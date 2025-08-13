@@ -1,25 +1,28 @@
-# 1) بناء الواجهة الأمامية
+# ===============================
+#  Frontend build (npm أو pnpm)
+# ===============================
 FROM node:20-alpine AS fe
 WORKDIR /fe
-COPY rfah-frontend/package*.json ./
-RUN npm ci
-COPY rfah-frontend/ .
-RUN npm run build
 
-# 2) تشغيل الواجهة الخلفية
-FROM python:3.12-slim
-WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+# لو المشروع يستخدم pnpm فعلناه عبر corepack
+RUN corepack enable
 
-COPY qer-backend/ /app/
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# ننسخ مجلد الواجهة بالكامل ثم نثبّت الاعتمادات ونبني
+COPY rfah-frontend/ ./
 
-RUN mkdir -p /app/src/static && rm -rf /app/src/static/* || true
-# إذا كان ناتج React هو build بدل dist بدّل المسار في السطر التالي إلى /fe/build/
-COPY --from=fe /fe/dist/ /app/src/static/
+# تثبيت الاعتمادات: pnpm إن وُجد lockfile، وإلا npm ci، وإن لم يوجد package-lock.json نستخدم npm install
+RUN if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \
+    elif [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-ENV PORT=8080
-EXPOSE 8080
-CMD ["bash","-lc","exec gunicorn -w 3 -b 0.0.0.0:${PORT} src.main:app"]
+# البناء (يدعم pnpm أو npm)
+RUN if [ -f pnpm-lock.yaml ]; then pnpm run build; else npm run build; fi
+
+# نجمع ناتج البناء (dist أو build) في مجلد واحد
+RUN mkdir -p /bundle-static && \
+    if [ -d dist ]; then cp -r dist/* /bundle-static/; \
+    elif [ -d build ]; then cp -r build/* /bundle-static/; \
+    else echo "No dist/ or build/ directory found after frontend build" && ls -la && exit 1; fi
+
+
+# ===============================
+#  Python backend (Flask +
