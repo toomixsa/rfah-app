@@ -1,4 +1,3 @@
-# qer-backend/src/models/user.py
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -13,6 +12,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     full_name = db.Column(db.String(120))
     is_active = db.Column(db.Boolean, default=True)
+    is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, password: str):
@@ -28,5 +28,6 @@ class User(db.Model):
             "email": self.email,
             "full_name": self.full_name,
             "is_active": self.is_active,
+            "is_admin": self.is_admin,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
