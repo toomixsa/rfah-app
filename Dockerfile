@@ -1,58 +1,49 @@
-# =========================
-# 1) Build Frontend (Vite/React) باستخدام npm أو pnpm
-# =========================
+# ------------ FE: Build ------------
 FROM node:20-alpine AS fe
 WORKDIR /fe
-
-# انسخ مشروع الواجهة
 COPY rfah-frontend/ ./
+# يشتغل سواء عندك pnpm-lock أو package-lock أو لا
+RUN corepack enable \
+ && if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \
+    elif [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN if [ -f pnpm-lock.yaml ]; then pnpm run build; else npm run build; fi
 
-# فعّل corepack (لـ pnpm عند وجود pnpm-lock.yaml) وثبّت الاعتمادات ثم ابنِ
-RUN corepack enable && \
-    if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \
-    elif [ -f package-lock.json ]; then npm ci; else npm install; fi && \
-    npm run build
-
-# وحّد ناتج البناء (dist أو build) في مجلد واحد
-RUN mkdir -p /bundle-static && \
-    if [ -d dist ]; then cp -r dist/* /bundle-static/; \
+# نجمع ناتج البناء dist/ أو build/ في مجلد موحّد
+RUN mkdir -p /bundle-static \
+ && if [ -d dist ]; then cp -r dist/* /bundle-static/; \
     elif [ -d build ]; then cp -r build/* /bundle-static/; \
     else echo "No dist/ or build/ directory found after frontend build" && ls -la && exit 1; fi
 
+# ------------ PY: Runtime ------------
+FROM python:3.12-slim AS app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000 \
+    FLASK_ENV=production \
+    SECRET_KEY=change-me-please
 
-# =========================
-# 2) Backend Runtime (Python + Gunicorn)
-# =========================
-FROM python:3.12-slim AS run
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# أدوات بناء خفيفة لبعض الحزم (يمكن حذفها لاحقًا إن لم تُستخدم)
+# باكدجات النظام الخفيفة + مجلد instance لقاعدة البيانات
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc && rm -rf /var/lib/apt/lists/*
+    curl ca-certificates tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /app/instance && chmod -R 777 /app/instance
 
-# ثبّت متطلبات الباكند
-COPY qer-backend/requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir gunicorn
+# متطلبات بايثون
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
-# انسخ كود الباكند
-COPY qer-backend/ ./
+# كود الباك
+COPY src/ /app/src/
 
-# انسخ ملفات الواجهة المبنية إلى static داخل تطبيق Flask
+# ملفات الواجهة الجاهزة تُنسخ إلى static التي يقرؤها Flask
 COPY --from=fe /bundle-static/ /app/src/static/
 
-# المنفذ وعدد العمال (قلّل العمال لتناسب الخطة المجانية)
-ENV PORT=8000 \
-    GUNICORN_WORKERS=1
+# صحّة بسيطة
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:${PORT}/healthz || exit 1
 
-EXPOSE 8000
-
-# أنشئ مجلد قاعدة البيانات (SQLite) قبل الإقلاع ثم شغّل Gunicorn
-# ملاحظة: يُستحسن ضبط DATABASE_URL في متغيرات البيئة (مثلاً sqlite:////app/src/instance/app.db)
-CMD ["bash","-lc","mkdir -p /app/instance /app/src/instance /app/data && echo Using DB: ${SQLALCHEMY_DATABASE_URI:-$DATABASE_URL} && exec gunicorn -w ${GUNICORN_WORKERS:-1} -b 0.0.0.0:${PORT} src.main:app"]
-
-
+EXPOSE ${PORT}
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["gunicorn","-k","gthread","-w","2","-b","0.0.0.0:8000","src.main:app","--timeout","120"]
