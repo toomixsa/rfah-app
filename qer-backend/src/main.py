@@ -3,9 +3,22 @@ from pathlib import Path
 from flask import Flask, send_from_directory, jsonify, redirect
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+# النماذج وقاعدة البيانات
 from .models import db, User
-from .routes.auth import auth_bp
-from .routes.urls import urls_bp
+
+# حاول تحميل البلوبرِنتات بشكل آمن
+HAS_AUTH = HAS_URLS = False
+try:
+    from .routes.auth import auth_bp
+    HAS_AUTH = True
+except Exception as e:
+    print("[init] auth blueprint not loaded:", e)
+
+try:
+    from .routes.urls import urls_bp
+    HAS_URLS = True
+except Exception as e:
+    print("[init] urls blueprint not loaded:", e)
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STATIC = BASE_DIR / "static"
@@ -35,9 +48,11 @@ def create_app() -> Flask:
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
 
-    # API Blueprints
-    app.register_blueprint(auth_bp, url_prefix="/api/auth")
-    app.register_blueprint(urls_bp, url_prefix="/api/urls")
+    # سجّل البلوبرِنتات فقط إذا وُجدت
+    if HAS_AUTH:
+        app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    if HAS_URLS:
+        app.register_blueprint(urls_bp, url_prefix="/api/urls")
 
     @app.get("/api/health")
     def health():
