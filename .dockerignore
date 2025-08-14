@@ -1,0 +1,9 @@
+.git
+**/__pycache__/
+**/*.pyc
+.venv
+venv
+rfah-frontend/node_modules
+rfah-frontend/.vite
+rfah-frontend/dist
+**/.DS_Store
