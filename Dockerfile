@@ -39,4 +39,4 @@ ENV FLASK_ENV=production
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini","--"]
-CMD ["gunicorn","-w","2","-b","0.0.0.0:8000","src.main:app"]
+CMD ["gunicorn","--preload","-w","1","-b","0.0.0.0:8000","src.main:app","--timeout","120"]
