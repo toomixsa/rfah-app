@@ -53,4 +53,5 @@ EXPOSE 8000
 
 # أنشئ مجلد قاعدة البيانات (SQLite) قبل الإقلاع ثم شغّل Gunicorn
 # ملاحظة: يُستحسن ضبط DATABASE_URL في متغيرات البيئة (مثلاً sqlite:////app/src/instance/app.db)
-CMD ["bash","-lc","mkdir -p /app/src/instance && exec gunicorn -w ${GUNICORN_WORKERS} -b 0.0.0.0:${PORT} src.main:app"]
+CMD ["bash","-lc","mkdir -p /app/data && exec gunicorn -w ${GUNICORN_WORKERS:-1} -b 0.0.0.0:${PORT} src.main:app"]
+
