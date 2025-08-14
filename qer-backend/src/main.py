@@ -1,94 +1,84 @@
-# qer-backend/src/main.py
+# ---------------------------------------------------------
+# Bootstrap admin (idempotent) — يُنشئ/يحدّث أدمن عند الإقلاع
+# ضع هذا المقطع بعد إنشاء app و db واستيراد نموذج User
+# ---------------------------------------------------------
 import os
-from flask import Flask, send_from_directory, jsonify
-from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash
 
-db = SQLAlchemy()
+# حاول الاستيراد من مسارَيّن شائعين، عدّل إذا لزم
+try:
+    from src.models import User
+except Exception:
+    from models import User  # بديل
 
-
-def _db_uri_from_env() -> str:
-    """
-    يختار عنوان قاعدة البيانات من المتغيرات البيئية:
-    - SQLALCHEMY_DATABASE_URI أو DATABASE_URL
-    - وإلا يستخدم SQLite داخل /app/instance/app.db
-    """
-    uri = os.getenv("SQLALCHEMY_DATABASE_URI") or os.getenv("DATABASE_URL")
-    if not uri:
-        uri = "sqlite:////app/instance/app.db"  # أربع شرطات لمسار مطلق
-    return uri
-
-
-def _ensure_sqlite_dir(uri: str) -> None:
-    """
-    إذا كانت القاعدة SQLite بملف (وليس in-memory)، أنشئ مجلد الملف قبل الاتصال.
-    """
-    if not uri.startswith("sqlite:"):
-        return
-
-    # sqlite:////absolute/path.db  -> /absolute/path.db
-    if uri.startswith("sqlite:////"):
-        db_path = uri.replace("sqlite:////", "/", 1)
-    # sqlite:///relative/path.db   -> /current/dir/relative/path.db (نحوّلها لمسار مطلق)
-    elif uri.startswith("sqlite:///"):
-        rel = uri.replace("sqlite:///", "", 1)
-        db_path = os.path.abspath(rel)
+def _set_password(user, raw_password: str):
+    """يضبط كلمة المرور حسب أسلوب النموذج لديك."""
+    if hasattr(user, "set_password") and callable(getattr(user, "set_password")):
+        user.set_password(raw_password)
+    elif hasattr(user, "password_hash"):
+        user.password_hash = generate_password_hash(raw_password)
     else:
-        # حالات مثل sqlite:///:memory: لا تحتاج مجلد
+        # بعض النماذج تستخدم حقل "password" كمخزن للهاش
+        user.password = generate_password_hash(raw_password)
+
+def bootstrap_admin_from_env():
+    """ينشئ/يحدّث حساب الأدمن استنادًا إلى متغيرات البيئة (أو القيم المقترَحة)."""
+    email = os.getenv("ADMIN_EMAIL", "admin@rafah.local").strip()
+    password = os.getenv("ADMIN_PASSWORD", "ChangeMe_987!").strip()
+    name = os.getenv("ADMIN_NAME", "Rafah Admin").strip()
+    role_value = os.getenv("ADMIN_ROLE", "admin").strip()
+
+    # لا تعمل شيئًا إذا قيم البيئة فارغة عمدًا
+    if not email or not password:
+        print("[bootstrap] ADMIN_EMAIL/ADMIN_PASSWORD not provided -> skip")
         return
 
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    from flask import current_app
+    with current_app.app_context():
+        # تأكد من وجود الجداول
+        try:
+            db.create_all()
+        except Exception as e:
+            print(f"[bootstrap] db.create_all() failed: {e}")
 
+        # ابحث بالمفاتيح المتاحة في النموذج (email / username)
+        u = None
+        if hasattr(User, "email"):
+            u = User.query.filter_by(email=email).first()
+        if not u and hasattr(User, "username"):
+            u = User.query.filter_by(username=email).first()
 
-def create_app() -> Flask:
-    # static_folder = "static" لأن Dockerfile ينسخ بناء الواجهة إلى /app/src/static
-    app = Flask(__name__, static_folder="static", static_url_path="/")
+        if u:
+            # تحديث كلمة المرور والاسم/الدور إن لزم
+            _set_password(u, password)
+            if hasattr(u, "name") and name:
+                u.name = name
+            if hasattr(u, "role") and role_value:
+                u.role = role_value
+            db.session.commit()
+            print(f"[bootstrap] admin updated: {email}")
+        else:
+            # إنشاء مستخدم جديد
+            attrs = {}
+            if hasattr(User, "email"):
+                attrs["email"] = email
+            if hasattr(User, "username"):
+                # إن كان نموذجك يعتمد username فقط، استخدم البريد كاسم مستخدم
+                attrs["username"] = email
+            if hasattr(User, "name"):
+                attrs["name"] = name
+            if hasattr(User, "role"):
+                attrs["role"] = role_value
 
-    # سر التطبيق (يُؤخذ من SECRET_KEY إن وُجد)
-    app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me")
+            u = User(**attrs)
+            _set_password(u, password)
+            db.session.add(u)
+            db.session.commit()
+            print(f"[bootstrap] admin created: {email}")
 
-    # إعداد قاعدة البيانات
-    db_uri = _db_uri_from_env()
-    _ensure_sqlite_dir(db_uri)
-    app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-    # تهيئة SQLAlchemy
-    db.init_app(app)
-
-    # استورد نماذجك (إن وُجدت) قبل create_all ليتم إنشاء الجداول
-    # غيّر الاستيراد حسب مكان ملفات الموديلات عندك (مثلاً: from .models.user import User)
-    try:
-        from . import models  # noqa: F401
-    except Exception:
-        # لو ما عندك ملفات models بعد، عادي
-        pass
-
-    # إنشاء الجداول (لن ينشئ شيئًا إن لم توجد نماذج)
-    with app.app_context():
-        db.create_all()
-
-    # مسار صحي للفحص
-    @app.get("/healthz")
-    def healthz():
-        return "ok", 200
-
-    # خدمة SPA: أي مسار غير موجود يعاد توجيهه إلى index.html داخل static
-    @app.route("/", defaults={"path": ""})
-    @app.route("/<path:path>")
-    def catch_all(path: str):
-        index_path = os.path.join(app.static_folder, "index.html")
-        if os.path.exists(index_path):
-            return send_from_directory(app.static_folder, "index.html")
-        # احتياطي إن لم توجد واجهة مبنية
-        return jsonify({"status": "running"}), 200
-
-    return app
-
-
-# كائن التطبيق الذي يستخدمه gunicorn: "src.main:app"
-app = create_app()
-
-if __name__ == "__main__":
-    # تشغيل محليًا (اختياري)
-    port = int(os.getenv("PORT", "8000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+# استدعاء البوتستراب عند الإقلاع
+try:
+    bootstrap_admin_from_env()
+except Exception as e:
+    print(f"[bootstrap] failed: {e}")
+# ---------------------------------------------------------
