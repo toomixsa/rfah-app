@@ -1,98 +1,94 @@
+# qer-backend/src/main.py
 import os
-import sys
-# DON'T CHANGE THIS !!!
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from flask import Flask, send_from_directory, jsonify
+from flask_sqlalchemy import SQLAlchemy
 
-from flask import Flask, send_from_directory
-from flask_cors import CORS
-from src.models.user import db
-from src.routes.user import user_bp
-from src.routes.url import url_bp
-from src.routes.auth import auth_bp
+db = SQLAlchemy()
 
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
-app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
 
-# تمكين CORS للسماح بالطلبات من الواجهة الأمامية مع دعم الجلسات
-CORS(app, supports_credentials=True, origins=['http://localhost:5000', 'http://127.0.0.1:5000'])
+def _db_uri_from_env() -> str:
+    """
+    يختار عنوان قاعدة البيانات من المتغيرات البيئية:
+    - SQLALCHEMY_DATABASE_URI أو DATABASE_URL
+    - وإلا يستخدم SQLite داخل /app/instance/app.db
+    """
+    uri = os.getenv("SQLALCHEMY_DATABASE_URI") or os.getenv("DATABASE_URL")
+    if not uri:
+        uri = "sqlite:////app/instance/app.db"  # أربع شرطات لمسار مطلق
+    return uri
 
-app.register_blueprint(user_bp, url_prefix='/api')
-app.register_blueprint(url_bp, url_prefix='/api')
-app.register_blueprint(auth_bp, url_prefix='/api/auth')
 
-# uncomment if you need to use database
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(app)
+def _ensure_sqlite_dir(uri: str) -> None:
+    """
+    إذا كانت القاعدة SQLite بملف (وليس in-memory)، أنشئ مجلد الملف قبل الاتصال.
+    """
+    if not uri.startswith("sqlite:"):
+        return
 
-with app.app_context():
-    db.create_all()
-    
-    # إنشاء مستخدمين افتراضيين للاختبار
-    from src.models.user import User
-    
-    # التحقق من وجود المسؤول
-    admin_user = User.query.filter_by(username='admin').first()
-    if not admin_user:
-        admin_user = User(
-            username='admin',
-            email='admin@qer.me',
-            password='admin123',
-            full_name='مدير النظام',
-            is_admin=True
-        )
-        db.session.add(admin_user)
-        
-        # إنشاء موظف تجريبي
-        employee_user = User(
-            username='employee1',
-            email='employee1@qer.me',
-            password='123456',
-            full_name='أحمد محمد',
-            is_admin=False
-        )
-        db.session.add(employee_user)
-        
-        # إنشاء موظف آخر
-        employee2_user = User(
-            username='employee2',
-            email='employee2@qer.me',
-            password='123456',
-            full_name='فاطمة علي',
-            is_admin=False
-        )
-        db.session.add(employee2_user)
-        
-        db.session.commit()
-        print("تم إنشاء المستخدمين الافتراضيين:")
-        print("المسؤول: admin@qer.me / admin123")
-        print("الموظف 1: employee1@qer.me / 123456")
-        print("الموظف 2: employee2@qer.me / 123456")
-
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-            return "Static folder not configured", 404
-
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
+    # sqlite:////absolute/path.db  -> /absolute/path.db
+    if uri.startswith("sqlite:////"):
+        db_path = uri.replace("sqlite:////", "/", 1)
+    # sqlite:///relative/path.db   -> /current/dir/relative/path.db (نحوّلها لمسار مطلق)
+    elif uri.startswith("sqlite:///"):
+        rel = uri.replace("sqlite:///", "", 1)
+        db_path = os.path.abspath(rel)
     else:
-        index_path = os.path.join(static_folder_path, 'index.html')
+        # حالات مثل sqlite:///:memory: لا تحتاج مجلد
+        return
+
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+
+def create_app() -> Flask:
+    # static_folder = "static" لأن Dockerfile ينسخ بناء الواجهة إلى /app/src/static
+    app = Flask(__name__, static_folder="static", static_url_path="/")
+
+    # سر التطبيق (يُؤخذ من SECRET_KEY إن وُجد)
+    app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me")
+
+    # إعداد قاعدة البيانات
+    db_uri = _db_uri_from_env()
+    _ensure_sqlite_dir(db_uri)
+    app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    # تهيئة SQLAlchemy
+    db.init_app(app)
+
+    # استورد نماذجك (إن وُجدت) قبل create_all ليتم إنشاء الجداول
+    # غيّر الاستيراد حسب مكان ملفات الموديلات عندك (مثلاً: from .models.user import User)
+    try:
+        from . import models  # noqa: F401
+    except Exception:
+        # لو ما عندك ملفات models بعد، عادي
+        pass
+
+    # إنشاء الجداول (لن ينشئ شيئًا إن لم توجد نماذج)
+    with app.app_context():
+        db.create_all()
+
+    # مسار صحي للفحص
+    @app.get("/healthz")
+    def healthz():
+        return "ok", 200
+
+    # خدمة SPA: أي مسار غير موجود يعاد توجيهه إلى index.html داخل static
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def catch_all(path: str):
+        index_path = os.path.join(app.static_folder, "index.html")
         if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "index.html not found", 404
+            return send_from_directory(app.static_folder, "index.html")
+        # احتياطي إن لم توجد واجهة مبنية
+        return jsonify({"status": "running"}), 200
+
+    return app
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+# كائن التطبيق الذي يستخدمه gunicorn: "src.main:app"
+app = create_app()
 
-
-import os
-os.makedirs("/app/data", exist_ok=True)
-
-db_url = os.getenv("SQLALCHEMY_DATABASE_URI") or os.getenv("DATABASE_URL") or "sqlite:////app/data/app.db"
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-
+if __name__ == "__main__":
+    # تشغيل محليًا (اختياري)
+    port = int(os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port, debug=True)
