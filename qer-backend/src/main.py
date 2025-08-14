@@ -89,3 +89,10 @@ def serve(path):
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 
+
+import os
+os.makedirs("/app/data", exist_ok=True)
+
+db_url = os.getenv("SQLALCHEMY_DATABASE_URI") or os.getenv("DATABASE_URL") or "sqlite:////app/data/app.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+
