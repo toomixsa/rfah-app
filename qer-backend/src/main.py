@@ -38,12 +38,12 @@ def _ensure_sqlite_dir(uri: str) -> None:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
 
-# -----------------------------
-# إنشاء تطبيق Flask
-# -----------------------------
 def create_app() -> Flask:
-    # نعرض الواجهة من /app/src/static (حسب Dockerfile)
-    app = Flask(__name__, static_folder="src/static", static_url_path="/")
+    # لو فيه مجلد /bundle-static استخدمه، وإلا استخدم /app/src/static
+    static_dir = "/bundle-static" if os.path.isdir("/bundle-static") else "/app/src/static"
+    app = Flask(__name__, static_folder=static_dir, static_url_path="/")
+    ...
+
 
     # مفاتيح عامة
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me")
