@@ -1,75 +1,91 @@
-// rfah-frontend/src/components/Login.jsx
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Eye, EyeOff, LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const Login = ({ onLogin }) => {
   const [formData, setFormData] = useState({
-    identifier: '',   // <-- بدل username
-    password: ''
+    username: '',
+    password: '',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  async function safeParseJSON(response) {
-    const ct = response.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      try {
-        return await response.json();
-      } catch {
-        return null;
-      }
+  // خريطة رسائل الأخطاء القادمة من الباك
+  const errorMessage = (code) => {
+    switch (code) {
+      case 'missing_fields':
+        return 'الرجاء إدخال اسم المستخدم/الإيميل وكلمة المرور';
+      case 'invalid_credentials':
+        return 'بيانات الدخول غير صحيحة';
+      case 'invalid_json':
+        return 'صيغة الطلب غير صحيحة';
+      default:
+        return 'خطأ في تسجيل الدخول';
     }
-    return null;
-  }
+  };
+
+  // فحص الجلسة عند فتح الصفحة
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/check-session', {
+          method: 'GET',
+          credentials: 'include',
+        });
+        if (!isMounted) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.ok && data?.user) {
+            onLogin?.(data.user);
+          }
+        }
+      } catch {
+        /* نتجاهل الخطأ هنا */
+      }
+    })();
+    return () => { isMounted = false; };
+  }, [onLogin]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (loading) return;
-
     setLoading(true);
     setError('');
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include', // مهم لحفظ الجلسة
+        credentials: 'include', // مهم للجلسة
         body: JSON.stringify({
-          identifier: formData.identifier?.trim(),
-          password: formData.password
-        })
+          identifier: formData.username?.trim(), // اسم المستخدم أو الإيميل
+          password: formData.password,
+        }),
       });
 
-      const data = await safeParseJSON(res);
-
-      if (!res.ok) {
-        // أخطاء شائعة مع رسائل عربية
-        if (res.status === 400) setError('الرجاء إدخال اسم المستخدم/البريد وكلمة المرور');
-        else if (res.status === 401) setError('بيانات الدخول غير صحيحة');
-        else setError(data?.error || 'خطأ في الاتصال بالخادم');
-        return;
+      // حاول قراءة JSON حتى لو كان status خطأ
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        /* قد يرجع الباك HTML في حالة خطأ غير متوقع */
       }
 
-      // شكل رد الخادم: { ok: true, user: {..} }
-      if (data?.ok && data.user) {
+      if (response.ok && data?.success) {
         onLogin?.(data.user);
       } else {
-        setError(data?.error || 'خطأ في تسجيل الدخول');
+        setError(errorMessage(data?.error));
       }
     } catch {
-      setError('تعذر الاتصال بالخادم. حاول لاحقًا.');
+      setError('خطأ في الاتصال بالخادم');
     } finally {
       setLoading(false);
     }
   };
 
   const handleChange = (e) => {
-    setFormData((prev) => ({
-      ...prev,
-      [e.target.name]: e.target.value
-    }));
+    setFormData((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
   return (
@@ -80,8 +96,7 @@ const Login = ({ onLogin }) => {
 
       <div className="login-card">
         <div className="login-header">
-          {/* ملاحظة: ضع الشعار داخل مجلد public باسم rafah-logo.png
-              ثم استخدم /rafah-logo.png كما بالأسفل */}
+          {/* ضَع الصورة في public/rafah-logo.png */}
           <img
             src="/rafah-logo.png"
             alt="جمعية رفاه"
@@ -95,17 +110,18 @@ const Login = ({ onLogin }) => {
           {error && <div className="error-message">{error}</div>}
 
           <div className="form-group">
-            <label htmlFor="identifier">اسم المستخدم أو البريد الإلكتروني</label>
+            <label htmlFor="username">اسم المستخدم أو البريد الإلكتروني</label>
             <input
               type="text"
-              id="identifier"
-              name="identifier"
-              value={formData.identifier}
+              id="username"
+              name="username"
+              value={formData.username}
               onChange={handleChange}
               required
               placeholder="أدخل اسم المستخدم أو البريد الإلكتروني"
               className="form-input"
               autoComplete="username"
+              inputMode="email"
             />
           </div>
 
@@ -125,7 +141,7 @@ const Login = ({ onLogin }) => {
               />
               <button
                 type="button"
-                onClick={() => setShowPassword((s) => !s)}
+                onClick={() => setShowPassword((v) => !v)}
                 className="password-toggle"
                 aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
               >
@@ -134,8 +150,19 @@ const Login = ({ onLogin }) => {
             </div>
           </div>
 
-          <Button type="submit" disabled={loading} className="login-button">
-            {loading ? <div className="loading-spinner small"></div> : (<><LogIn size={18} /> تسجيل الدخول</>)}
+          <Button
+            type="submit"
+            disabled={loading}
+            className="login-button"
+          >
+            {loading ? (
+              <div className="loading-spinner small" />
+            ) : (
+              <>
+                <LogIn size={18} />
+                <span className="ms-2">تسجيل الدخول</span>
+              </>
+            )}
           </Button>
         </form>
 
