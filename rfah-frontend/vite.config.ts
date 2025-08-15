@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/static/',       // مهم: لكي تظهر الصور والأصول من السيرفر نفسه
-  build: { outDir: 'dist' }
+  base: '/',                    // مهم لتوليد مسارات صحيحة
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets'
+  }
 })
