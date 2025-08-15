@@ -1,5 +1,5 @@
-# src/extensions.py
+# qer-backend/src/extensions.py
 from flask_sqlalchemy import SQLAlchemy
 
-# إنستانس واحد يُستعمل في كل مكان
+# إنستانس واحد مشترك في كل المشروع
 db = SQLAlchemy()
