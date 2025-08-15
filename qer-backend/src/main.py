@@ -2,283 +2,224 @@
 from __future__ import annotations
 
 import os
-import re
-import json
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from datetime import datetime
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# -----------------------------------------------------------------------------
-# تهيئة عامة
-# -----------------------------------------------------------------------------
-db = SQLAlchemy()
+try:
+    from flask_cors import CORS  # type: ignore
+except Exception:  # حيلة في حال لم تُثبَّت المكتبة
+    CORS = lambda app, **_: app  # noqa: E731
 
-# مسار مجلد instance داخل الحاوية (مطلوب لـ SQLite)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # /app/src -> /app
-INSTANCE_DIR = PROJECT_ROOT / "instance"
+# -----------------------------
+# إعداد المسارات العامة
+# -----------------------------
+APP_DIR = Path(__file__).resolve().parent  # عادةً src/
+ROOT_DIR = APP_DIR.parent                   # جذر الباك
+INSTANCE_DIR = Path("/app/instance")        # يتوافق مع Dockerfile
+STATIC_BUNDLE = Path("/bundle-static")      # ننسخ إليه واجهة الفرونت
+
 INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------------------------------------------------------
-# الموديل: المستخدم
-# -----------------------------------------------------------------------------
-class User(db.Model):  # type: ignore[misc]
-    __tablename__ = "users"
+# -----------------------------
+# قاعدة البيانات
+# -----------------------------
+db = SQLAlchemy()
 
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, index=True, nullable=False)
-    email = db.Column(db.String(255), unique=True, index=True, nullable=False)
-    password_hash = db.Column(db.String(512), nullable=False)
-    full_name = db.Column(db.String(255), nullable=True)
-    is_active = db.Column(db.Boolean, default=True, nullable=False)
-    is_admin = db.Column(db.Boolean, default=False, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
-    def set_password(self, password: str) -> None:
-        self.password_hash = generate_password_hash(password)
+def get_db_uri() -> str:
+    # نحترم أي من المتغيرين إن وُجد
+    uri = (
+        os.getenv("SQLALCHEMY_DATABASE_URI")
+        or os.getenv("DATABASE_URL")
+        or os.getenv("DATABASE_URI")
+        or os.getenv("DATABASE_URL".upper())
+        or os.getenv("DATABASE_URI".upper())
+    )
+    if uri:
+        return uri
+    # افتراضي: SQLite داخل مجلد instance
+    return "sqlite:////app/instance/app.db"
 
-    def check_password(self, password: str) -> bool:
-        return check_password_hash(self.password_hash, password)
 
-    def to_safe_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "username": self.username,
-            "email": self.email,
-            "full_name": self.full_name,
-            "is_active": self.is_active,
-            "is_admin": self.is_admin,
-            "created_at": self.created_at.isoformat(),
-        }
+# -----------------------------
+# نموذج المستخدم
+# سنحاول استيراده من مشروعك، وإن فشل نعرّفه هنا
+# -----------------------------
+User = None  # type: ignore
 
-# -----------------------------------------------------------------------------
-# أدوات مساعدة
-# -----------------------------------------------------------------------------
-def _get_env(key: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(key, default)
-    return v.strip() if isinstance(v, str) else v
 
-def _database_uri() -> str:
-    # أولوية: SQLALCHEMY_DATABASE_URI ثم DATABASE_URL ثم SQLite افتراضي
-    uri = _get_env("SQLALCHEMY_DATABASE_URI") or _get_env("DATABASE_URL")
-    if not uri:
-        # SQLite داخل /app/instance/app.db
-        uri = "sqlite:////app/instance/app.db"
-    # إصلاح شائع لـ sqlite:///relative/path
-    if uri.startswith("sqlite:///") and not uri.startswith("sqlite:////"):
-        # اجعل المسار مطلق داخل /app
-        relative = uri.replace("sqlite:///", "", 1)
-        uri = f"sqlite:////app/{relative}"
-    return uri
+def _define_inline_models():
+    """تعريف نموذج User بديل في حال لم يوجد داخل مشروعك."""
+    class _User(db.Model):  # type: ignore
+        __tablename__ = "users"
+        id = db.Column(db.Integer, primary_key=True)
+        username = db.Column(db.String(80), unique=True, nullable=False)
+        email = db.Column(db.String(255), unique=True, nullable=False)
+        password_hash = db.Column(db.String(255), nullable=False)
+        full_name = db.Column(db.String(255))
+        is_active = db.Column(db.Boolean, default=True)
+        is_admin = db.Column(db.Boolean, default=False)
+        created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-def _admin_from_env() -> dict:
-    return {
-        "username": _get_env("ADMIN_USERNAME", "admin"),
-        "email": _get_env("ADMIN_EMAIL", "admin@example.com"),
-        "password": _get_env("ADMIN_PASSWORD", "Admin@1234"),
-        "full_name": _get_env("ADMIN_FULL_NAME", "Administrator"),
-    }
+        def set_password(self, raw: str) -> None:
+            self.password_hash = generate_password_hash(raw)
 
-def _validate_password(pw: str) -> bool:
-    # بسيط: 8+ حروف وفيه أحرف كبيرة/صغيرة/أرقام/رمز (مرن)
-    if len(pw) < 8:
-        return False
-    categories = sum([
-        bool(re.search(r"[A-Z]", pw)),
-        bool(re.search(r"[a-z]", pw)),
-        bool(re.search(r"\d", pw)),
-        bool(re.search(r"[^A-Za-z0-9]", pw)),
-    ])
-    return categories >= 3
+        def check_password(self, raw: str) -> bool:
+            return check_password_hash(self.password_hash, raw)
 
-# -----------------------------------------------------------------------------
-# إنشاء التطبيق
-# -----------------------------------------------------------------------------
+    return _User
+
+
+try:
+    # جرّب مسارات مألوفة داخل مشاريع Flask
+    # (عدّل المسارات حسب هيكلتك إن لزم)
+    from src.models.user import User as _User  # type: ignore
+    User = _User
+except Exception:
+    try:
+        from models.user import User as _User  # type: ignore
+        User = _User
+    except Exception:
+        # سنستخدم النموذج الداخلي
+        User = _define_inline_models()
+
+
+# -----------------------------
+# تهيئة التطبيق
+# -----------------------------
 def create_app() -> Flask:
-    app = Flask(__name__, static_folder=str(PROJECT_ROOT / "static"), static_url_path="/")
+    app = Flask(
+        __name__,
+        static_folder=str(STATIC_BUNDLE),   # نخلي Flask يعرف مجلد الواجهة
+        static_url_path="",                  # بحيث تكون الملفات على /
+    )
 
-    # سر التطبيق
-    app.config["SECRET_KEY"] = _get_env("SECRET_KEY") or "rfah-secret-key"
+    # مفتاح سرّي
+    app.config["SECRET_KEY"] = os.getenv(
+        "SECRET_KEY", "change-me-please-very-long"
+    )
 
     # قاعدة البيانات
-    app.config["SQLALCHEMY_DATABASE_URI"] = _database_uri()
+    app.config["SQLALCHEMY_DATABASE_URI"] = get_db_uri()
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    # CORS (السماح للواجهة بالوصول إلى API)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
-
-    # تهيئة DB
     db.init_app(app)
+    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/health": {"origins": "*"}})
+
+    # أنشئ الجداول (SQLite) إن لم تكن موجودة
     with app.app_context():
         db.create_all()
-        _seed_admin_if_missing()
+        _seed_admin()
 
-    # ------------------ Health ------------------
+    # -------------------------
+    # Health checks
+    # -------------------------
     @app.get("/health")
-    def health() -> tuple[dict, int]:
-        return {"status": "running"}, 200
+    def health_root():
+        return jsonify(status="running"), 200
 
-    # ------------------ Auth: Login ------------------
-    @app.post("/api/auth/login")
+    @app.get("/api/health")
+    def health_api():
+        return jsonify(status="running"), 200
+
+    # -------------------------
+    # API: تسجيل الدخول
+    # -------------------------
+    @app.post("/api/login")
     def api_login():
+        # يدعم JSON و x-www-form-urlencoded
+        payload = request.get_json(silent=True) or request.form or {}
+        identity = (payload.get("identity") or payload.get("username") or payload.get("email") or "").strip()
+        password = (payload.get("password") or "").strip()
+
+        if not identity or not password:
+            return jsonify(error="missing_fields"), 400
+
+        # ابحث باليوزرنيم أو الإيميل
+        user = (
+            User.query.filter((User.username == identity) | (User.email == identity))
+            .first()
+        )
+
+        if not user or not getattr(user, "is_active", True):
+            return jsonify(error="invalid_credentials"), 401
+
+        if not user.check_password(password):
+            return jsonify(error="invalid_credentials"), 401
+
+        # نجعل الاستجابة بسيطة ومباشرة
+        return jsonify(status="ok", user={"username": user.username, "email": user.email, "is_admin": bool(getattr(user, "is_admin", False))}), 200
+
+    # -------------------------
+    # خدمة واجهة الفرونت (SPA)
+    # -------------------------
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def spa(path: str):
         """
-        يقبل:
-        {
-          "identifier": "admin@example.com" أو "admin",
-          "password": "Admin@1234"
-        }
+        - يقدّم أي ملف ثابت إن وُجد في /bundle-static
+        - وإلا يُرجع index.html كـ fallback (تطبيق SPA)
         """
-        try:
-            data = request.get_json(silent=True) or {}
-            identifier = (data.get("identifier") or "").strip()
-            password = data.get("password") or ""
+        # ملف فعلي؟
+        candidate = STATIC_BUNDLE / path
+        if path and candidate.exists() and candidate.is_file():
+            return send_from_directory(str(STATIC_BUNDLE), path)
 
-            if not identifier or not password:
-                return jsonify({"ok": False, "error": "missing_fields"}), 400
+        # fallback إلى index.html إن وُجد
+        index_file = STATIC_BUNDLE / "index.html"
+        if index_file.exists():
+            return send_from_directory(str(STATIC_BUNDLE), "index.html")
 
-            # ابحث بالـ email أو username
-            user = None
-            if "@" in identifier:
-                user = User.query.filter_by(email=identifier).first()
-            if user is None:
-                user = User.query.filter_by(username=identifier).first()
-
-            if not user or not user.is_active:
-                return jsonify({"ok": False, "error": "invalid_credentials"}), 401
-
-            if not user.check_password(password):
-                return jsonify({"ok": False, "error": "invalid_credentials"}), 401
-
-            # نجاح
-            return jsonify({"ok": True, "user": user.to_safe_dict()}), 200
-
-        except Exception as e:
-            return jsonify({"ok": False, "error": "server_error", "detail": str(e)}), 500
-
-    # ------------------ Admin: Reset/Seed ------------------
-    @app.post("/api/auth/reset-admin")
-    def api_reset_admin():
-        """
-        يحميه ADMIN_SETUP_KEY
-        - أرسل المفتاح هيدر: X-Admin-Setup-Key
-          أو كـ query: ?key=VALUE
-        - يعيد إنشاء/تحديث حساب المدير من متغيرات البيئة
-        """
-        setup_key_env = _get_env("ADMIN_SETUP_KEY", "")
-        provided = request.headers.get("X-Admin-Setup-Key") or request.args.get("key") or ""
-        if not setup_key_env:
-            return jsonify({"ok": False, "error": "setup_key_not_configured"}), 400
-        if provided != setup_key_env:
-            return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-        # force=True لتحديث البيانات إن كانت موجودة
-        changed = _seed_admin(force=True)
-        return jsonify({"ok": True, "changed": changed}), 200
-
-    # ------------------ خدمة ملفات الواجهة (اختياري) ------------------
-    @app.get("/")
-    def index():
-        # إذا وُجد index.html داخل static سيتم تقديمه
-        index_path = Path(app.static_folder or "") / "index.html"
-        if index_path.is_file():
-            return send_from_directory(app.static_folder, "index.html")
-        return jsonify({"status": "running"}), 200
+        # إن لم توجد واجهة مبنية
+        return jsonify(status="running"), 200
 
     return app
 
-# -----------------------------------------------------------------------------
-# تهيئة/زرع حساب المدير
-# -----------------------------------------------------------------------------
-def _seed_admin_if_missing() -> None:
-    """إنشاء حساب المدير فقط إن لم يوجد (تجنب تكرار البريد)."""
-    env = _admin_from_env()
-    user = User.query.filter(
-        (User.email == env["email"]) | (User.username == env["username"])
-    ).first()
-    if user is None:
-        user = User(
-            username=env["username"],
-            email=env["email"],
-            full_name=env["full_name"],
-            is_active=True,
-            is_admin=True,
-        )
-        pw = env["password"] or "Admin@1234"
-        if not _validate_password(pw):
-            pw = "Admin@1234"
-        user.set_password(pw)
-        db.session.add(user)
-        db.session.commit()
 
-def _seed_admin(force: bool = False) -> dict:
+# -----------------------------
+# تهيئة/زرع حساب الأدمن
+# -----------------------------
+def _seed_admin() -> None:
     """
-    إنشاء/تحديث حساب المدير حسب متغيرات البيئة.
-    يعيد dict فيها تفاصيل ماذا حدث.
+    يزرع حساب أدمن فقط إن لم يوجد (حسب الإيميل أو اليوزرنيم).
+    يستخدم:
+      ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_USERNAME
     """
-    env = _admin_from_env()
-    result = {"created": False, "updated": False}
+    email = os.getenv("ADMIN_EMAIL", "").strip() or "admin@example.com"
+    username = os.getenv("ADMIN_USERNAME", "").strip() or "admin"
+    password = os.getenv("ADMIN_PASSWORD", "").strip() or "Admin@1234"
 
-    user = User.query.filter(
-        (User.email == env["email"]) | (User.username == env["username"])
+    # موجود مسبقاً؟
+    exists = User.query.filter(
+        (User.email == email) | (User.username == username)
     ).first()
+    if exists:
+        return
 
-    if user is None:
-        # إنشاء
-        user = User(
-            username=env["username"],
-            email=env["email"],
-            full_name=env["full_name"],
-            is_active=True,
-            is_admin=True,
-        )
-        pw = env["password"] or "Admin@1234"
-        if not _validate_password(pw):
-            pw = "Admin@1234"
-        user.set_password(pw)
-        db.session.add(user)
+    user = User(
+        username=username,
+        email=email,
+        full_name="Administrator",
+        is_active=True,
+        is_admin=True,
+    )
+    user.set_password(password)
+    db.session.add(user)
+    try:
         db.session.commit()
-        result["created"] = True
-    elif force:
-        # تحديث
-        changed = False
+    except Exception:
+        db.session.rollback()
+        # نتجاهل لو تعارضت UNIQUE، حفاظاً على الإقلاع
+        # بإمكانك تسجيلها في logs إذا رغبت
 
-        # لو تغيرت الـ username/email في البيئة نحدّثهما
-        if user.username != env["username"]:
-            # تأكد من عدم وجود اسم مستخدم مطابق
-            other_u = User.query.filter(User.username == env["username"], User.id != user.id).first()
-            if other_u is None:
-                user.username = env["username"]
-                changed = True
 
-        if user.email != env["email"]:
-            other_e = User.query.filter(User.email == env["email"], User.id != user.id).first()
-            if other_e is None:
-                user.email = env["email"]
-                changed = True
-
-        if env["full_name"] and user.full_name != env["full_name"]:
-            user.full_name = env["full_name"]
-            changed = True
-
-        if env["password"] and _validate_password(env["password"]):
-            user.set_password(env["password"])
-            changed = True
-
-        if changed:
-            db.session.commit()
-            result["updated"] = True
-
-    return result
-
-# -----------------------------------------------------------------------------
-# نقطة دخول جاهزة لِـ gunicorn: "src.main:app"
-# -----------------------------------------------------------------------------
+# متغيّر التطبيق الذي يقرأه Gunicorn:  src.main:app
 app = create_app()
 
-# للتشغيل محليًا: python -m src.main
+# تشغيل محلياً لو أردت:
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
