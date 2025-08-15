@@ -40,6 +40,12 @@ ENV PORT=8000 \
     FRONTEND_DIR=/app/src/static \
     SQLALCHEMY_DATABASE_URI=sqlite:////app/instance/app.db
 
+ENV PORT=8000
+CMD ["sh","-c","gunicorn --preload -w 1 -b 0.0.0.0:${PORT} src.main:app --timeout 120"]
+
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini","--"]
 CMD ["/bin/sh","-c","gunicorn -w ${GUNICORN_WORKERS:-2} -b 0.0.0.0:${PORT:-8000} src.main:app --timeout ${GUNICORN_TIMEOUT:-120}"]
+
+
+
