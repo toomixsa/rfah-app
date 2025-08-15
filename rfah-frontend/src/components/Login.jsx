@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Eye, EyeOff, LogIn } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button } from './ui/button'
+
 
 const Login = ({ onLogin }) => {
   const [formData, setFormData] = useState({
