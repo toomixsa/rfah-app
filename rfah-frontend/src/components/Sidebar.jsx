@@ -8,7 +8,8 @@ import {
   Settings,
   X
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button } from './ui/button'
+
 
 const Sidebar = ({ user, currentPage, onPageChange, isOpen, onClose }) => {
   const menuItems = [
